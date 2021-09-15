@@ -1,8 +1,8 @@
-from bs4 import BeautifulSoup
 import spacy
-from sentence_transformers import SentenceTransformer
-
+import pandas as pd
 import text_similarity
+from bs4 import BeautifulSoup
+from sentence_transformers import SentenceTransformer
 
 
 def get_html_text(html_document):
@@ -16,6 +16,7 @@ def get_language_sentences(english_filename,
                            danish_filename):
     # Load spacy pipeline
     nlp = spacy.load("xx_sent_ud_sm")
+    nlp_danish = spacy.load('da_core_news_lg')
 
     # Load the English and Danish texts
     english_text = get_html_text(english_filename)
@@ -27,148 +28,155 @@ def get_language_sentences(english_filename,
     eng_split = nlp(english_text.replace("\n", ""))
     for sent in eng_split.sents:
         en_sentences.append(sent)
-    da_split = nlp(danish_text.replace("\n", ""))
+    da_split = nlp_danish(danish_text.replace("\n", ""))
     for sent in da_split.sents:
-        da_sentences.append(sent)
+        da_sentences.append(nlp(sent.text))
     return en_sentences, da_sentences
 
 
-def get_navigation_lists(current_position,
-                         search_width=1):
-    # Get forward and backward navigation list
-    forward_positions = [current_position]
-    backward_positions = [current_position]
-    temp_forward_position = current_position
-    temp_backward_position = current_position
-    for i in range(search_width):
-        temp_forward_position += 1
-        forward_positions.append(temp_forward_position)
-        if temp_backward_position > 0:
-            temp_backward_position -= 1
-            backward_positions.append(temp_backward_position)
-    return forward_positions, backward_positions
+def remove_duplicates(lst):
+    return list(set([i for i in lst]))
 
 
-def forward_backward_search(forward_positions,
-                            backward_positions,
-                            english_sentences,
-                            danish_sentences):
-    # Begin with the forward search
-    temp_en_len = 0
-    temp_da_len = 0
-    results_list_en = []
-    results_list_da = []
-    joined_position_finder = 0
-    for en_fp in forward_positions:
-        if len(english_sentences) > en_fp and len(danish_sentences) > en_fp:
-            temp_en_len += len(english_sentences[en_fp])
-            temp_da_len += len(danish_sentences[en_fp])
-            for da_fp in forward_positions:
-                if len(danish_sentences) > da_fp:
-                    results_list_en.append(len(english_sentences[en_fp]))
-                    results_list_da.append(len(danish_sentences[da_fp]))
-                    joined_position_finder += 1
-                else:
-                    break
-        else:
-            break
-    results_list_en.append(temp_en_len)
-    results_list_da.append(temp_da_len)
-    return results_list_en, results_list_da, joined_position_finder
-
-
-def find_closest_elements(length_list_en,
-                          length_list_da):
-    closest_list = []
-    for en in length_list_en:
-        for da in length_list_da:
-            closest_list.append((length_list_en.index(en),
-                                 length_list_da.index(da),
-                                 abs(en - da)))
-    return closest_list
-
-
-def align_texts_on_lengths(english_sentences,
-                           danish_sentences):
-    aligned_list = []
-    fp, bp = get_navigation_lists(0)
-    while len(english_sentences) > 0 and \
-            len(danish_sentences) > 0:
-        temp_aligned = []
-        en_lengths, da_lengths, joined_position_finder = forward_backward_search(fp,
-                                                                                 bp,
-                                                                                 english_sentences,
-                                                                                 danish_sentences)
-        most_likely = sorted(list(set(find_closest_elements(en_lengths, da_lengths))), key=lambda x: x[2])[0]
-        if most_likely[0] == joined_position_finder:
-            temp_aligned.append(' '.join([e.text for e in english_sentences[:joined_position_finder - 2]]))
-            for i in range(joined_position_finder - 1):
-                english_sentences.pop(0)
-        else:
-            temp_aligned.append(english_sentences[most_likely[0]].text)
-            english_sentences.pop(0)
-        if most_likely[1] == joined_position_finder:
-            temp_aligned.append(' '.join([e.text for e in danish_sentences[:joined_position_finder - 2]]))
-            for i in range(joined_position_finder - 1):
-                danish_sentences.pop(0)
-        else:
-            temp_aligned.append(danish_sentences[most_likely[1]].text)
-            danish_sentences.pop(0)
-        aligned_list.append(temp_aligned)
-    return aligned_list
-
-
-def get_danish_coordinates(english_sentence,
-                           danish_sentence_search_width,
-                           current_position):
-    temp_length_results = []
-    for i, d_sentence in enumerate(danish_sentence_search_width):
-        temp_length_results.append(([current_position + i], abs(len(english_sentence.text) - len(d_sentence.text))))
-        temp_length_results.append(([current_position, current_position + i], abs(len(english_sentence.text) - len(
-            ''.join([t.text for t in danish_sentence_search_width[0:i]])))))
-    return temp_length_results
-
-
-def align_texts_on_lengths_references(english_sentences,
-                                      danish_sentences,
-                                      search_width=3):
-    # Reference_list should be the same length as the English sentences
-    reference_list = []
-    danish_coordinates = 0
+def match_english_sentences(english_sentences,
+                            danish_sentences,
+                            model,
+                            search_space=3):
+    english_sentence_results = []
+    danish_sentence_results = []
     for i, english_sentence in enumerate(english_sentences):
-        temp_reference_list = []
-        if len(reference_list) == len(english_sentence):
-            temp_reference_list.append(danish_coordinates)
-        elif i + search_width < len(danish_sentences):
-            danish_coordinates = sorted(get_danish_coordinates(english_sentence,
-                                                               danish_sentences[i:i + search_width],
-                                                               current_position=i), key=lambda x: x[1])[0]
-            #print(danish_coordinates)
-            temp_reference_list.append(danish_coordinates)
+        temp_abs = (100, 0, 0)
+        for j in range(search_space):
+            if len(danish_sentences) >= i + j:
+                try:
+                    current_abs = (abs(len(english_sentence) - len(danish_sentences[i + j])))
+                    sim_score = text_similarity.text_similarity(english_sentence.text, danish_sentences[i + j].text,
+                                                                model)
+                    if current_abs < temp_abs[0]:
+                        temp_abs = (current_abs, i + j, sim_score)
+                except:
+                    print("There has been an error with len(danish_sentences) in def match_english_sentences")
+            else:
+                break
+        dan_position = temp_abs[1]
+
+        if temp_abs[2] > 0.8:
+            print(i)
+            print("SIM_SCORE:{}".format(temp_abs[2]))
+            print("ENGLISH: {} \n DANISH: {} \n DAN_POSITION: {}".format(english_sentence.text,
+                                                                         danish_sentences[dan_position].text,
+                                                                         dan_position))
+            print("-----")
+            english_sentence_results.append(
+                ((english_sentence.text, i), (danish_sentences[dan_position].text, dan_position)))
         else:
-            temp_reference_list.append(None)
-        reference_list.append(temp_reference_list)
-    return reference_list
+            temp_en_sentence_search = [e[1][0] for e in english_sentence_results]
+            if danish_sentences[dan_position].text not in temp_en_sentence_search:
+                danish_sentence_results.append((danish_sentences[dan_position].text, dan_position))
+    return english_sentence_results, remove_duplicates(danish_sentence_results)
+
+
+def repeat_matching(english_sentence_results,
+                    english_sentences,
+                    danish_sentences,
+                    model,
+                    repeat=1,
+                    search_space=5):
+    for repeat_count in range(repeat):
+        # print("ENG XXXXXX {}".format(english_sentence_results))
+        # Remove English sentences already assigned corresponding Danish translations.
+        if repeat_count == 0:
+            english_positions = sorted([item[0][1] for item in english_sentence_results], reverse=True)
+            print("FIRST EN POS: {}".format(english_positions))
+        print("EN sentence len: {}".format(len(english_sentences)))
+        for num in english_positions:
+            del english_sentences[num]
+        print("EN sentence len: {}".format(len(english_sentences)))
+
+        # Remove Danish sentences already assigned corresponding English translations.
+        if repeat_count == 0:
+            danish_positions = sorted([item[1][1] for item in english_sentence_results], reverse=True)
+            print("FIRST DA POS: {}".format(danish_positions))
+        print("DA sentence len: {}".format(len(danish_sentences)))
+        for num in danish_positions:
+            del danish_sentences[num]
+        print("DA sentence len: {}".format(len(danish_sentences)))
+
+        # Repeat the alignment with new sentences
+        internal_en_sentence_results, internal_da_sentence_results = match_english_sentences(english_sentences,
+                                                                                             danish_sentences,
+                                                                                             model,
+                                                                                             search_space=search_space)
+
+        english_positions = sorted([item[0][1] for item in internal_en_sentence_results], reverse=True)
+        danish_positions = sorted([item[1][1] for item in internal_en_sentence_results], reverse=True)
+        print("NEXT EN POS: {}".format(english_positions))
+        print("NEXT DA POS: {}".format(danish_positions))
+
+        if not internal_en_sentence_results:
+            print("No matches - ending alignment.")
+            break
+        english_sentence_results += internal_en_sentence_results
+
+    return english_sentence_results
 
 
 if __name__ == "__main__":
     """    
-    1. Process for adding similarity scores has been added, but there are still problems.
-    It seems to reorder the lists fine, but it needs to perform similarity scores because it's still out of sync.
+    1. Match all sentences in the English list.
+    1.1. 
     """
-    english_sentences, danish_sentences = get_language_sentences("english_eu.html",
-                                                                 "danish_eu.html")
 
+    # Danish Parliament texts (separated)
+    """english_sentences, danish_sentences = get_language_sentences("english_eu.html",
+                                                                 "danish_eu.html")"""
+
+    # en_da (pandas parallel - not confirmed)
+    # df = pd.read_csv("en_da.csv")
+
+    # da_en statistics (pandas parallel - confirmed)
+    df = pd.read_csv("da_en_statistic.csv")
+
+    nlp = spacy.load("xx_sent_ud_sm")
+    nlp_danish = spacy.load('da_core_news_lg')
+    # Base sentence segmentation code
+    """english_sentences = [nlp(sent) for sent in df['English'].to_list()[:100] if not isinstance(sent, float)]
+    danish_sentences = [nlp(sent) for sent in df['Danish'].to_list()[:100] if not isinstance(sent, float)]
+    """
+
+    eng_split = nlp(' '.join(df['English'].to_list()))
+    da_split = nlp_danish(' '.join(df['Danish'].to_list()))
+    english_sentences = []
+    danish_sentences = []
+    for sent in eng_split.sents:
+        english_sentences.append(sent)
+    for sent in da_split.sents:
+        danish_sentences.append(nlp(sent.text))
+    print("eng_split: {} \n english_sentences: {}".format(len(eng_split), len(english_sentences)))
+    print("da_split: {} \n danish_sentences: {}".format(len(da_split), len(danish_sentences)))
     model = SentenceTransformer('sentence-transformers/stsb-xlm-r-multilingual')
 
-    coordinates = align_texts_on_lengths_references(english_sentences, danish_sentences)
-    for i, c in enumerate(coordinates):
+    en_sentence_results, da_sentence_results = match_english_sentences(english_sentences,
+                                                                       danish_sentences,
+                                                                       model,
+                                                                       search_space=5)
+
+    # English Sentences
+    print("===ENGLISH RESULTS ===")
+    for e in en_sentence_results:
+        print(e)
         print("----")
-        print("Number: {}".format(i))
-        if len(c) != 2:
-            print("DANISH SENTENCE: {}".format(c[0][0][0]))
-            print("English: {}\n Danish: {}".format(english_sentences[i], danish_sentences[c[0][0][0]]))
-        else:
-            print("DANISH SENTENCE: {}".format(c[0][0][0], c[0][0][1]))
-            print("English: {}\n Danish: {}".format(english_sentences[i], danish_sentences[c[0][0][0], c[0][0][1]]))
-        print("----")
+    repeating_results = repeat_matching(en_sentence_results,
+                                        english_sentences,
+                                        danish_sentences,
+                                        model=model,
+                                        repeat=6,
+                                        search_space=5)
+    en_repeating_results = sorted(repeating_results, key=lambda x: x[0][1])
+    for e in en_repeating_results:
+        print("ENGLISH: {} \n DANISH: {}".format(e[0], e[1]))
+        print("---")
+    # Danish Sentences
+    """for d in da_sentence_results:
+        print(d)
+        print("====")"""
