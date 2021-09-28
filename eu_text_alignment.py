@@ -1,3 +1,5 @@
+from collections import Counter
+
 import spacy
 import pandas as pd
 import text_similarity
@@ -41,7 +43,8 @@ def remove_duplicates(lst):
 def match_english_sentences(english_sentences,
                             danish_sentences,
                             model,
-                            search_space=3):
+                            search_space=3,
+                            sim_threshold=0.7):
     english_sentence_results = []
     danish_sentence_results = []
     for i, english_sentence in enumerate(english_sentences):
@@ -50,19 +53,25 @@ def match_english_sentences(english_sentences,
             if len(danish_sentences) >= i + j:
                 try:
                     current_abs = (abs(len(english_sentence) - len(danish_sentences[i + j])))
+                    # Using spacy instead of the external sim script.
                     sim_score = text_similarity.text_similarity(english_sentence.text, danish_sentences[i + j].text,
                                                                 model)
+                    #sim_score = english_sentence.similarity(danish_sentences[i+j])
+                    verb_sim_score = sim_score_pos(english_sentence, danish_sentences[i + j], pos_type="VERB")
+                    noun_sim_score = sim_score_pos(english_sentence, danish_sentences[i + j], pos_type="NOUN")
                     if current_abs < temp_abs[0]:
-                        temp_abs = (current_abs, i + j, sim_score)
+                        temp_abs = (current_abs, i + j, sim_score, verb_sim_score, noun_sim_score)
                 except:
                     print("There has been an error with len(danish_sentences) in def match_english_sentences")
             else:
                 break
         dan_position = temp_abs[1]
 
-        if temp_abs[2] > 0.8:
+        if temp_abs[3] > sim_threshold or temp_abs[4] > sim_threshold:
             print(i)
             print("SIM_SCORE:{}".format(temp_abs[2]))
+            print("VERB_SIM_SCORE: {}".format(temp_abs[3]))
+            print("NOUN_SIM_SCORE: {}".format(temp_abs[4]))
             print("ENGLISH: {} \n DANISH: {} \n DAN_POSITION: {}".format(english_sentence.text,
                                                                          danish_sentences[dan_position].text,
                                                                          dan_position))
@@ -121,6 +130,52 @@ def repeat_matching(english_sentence_results,
     return english_sentence_results
 
 
+def validate_results(series,
+                     gold_standard):
+    if series['English'] in gold_standard.keys():
+        if series['Danish'] == gold_standard[series['English']]:
+            return "Perfect Match"
+        else:
+            return "English Match"
+    else:
+        return "No Match"
+
+
+def sim_score_pos(spacy_english_sentence,
+                    spacy_danish_sentence,
+                    pos_type="VERB"):
+    average_verb_sim_score = 0
+    internal_nlp_english = spacy.load('en_core_web_lg')
+    internal_nlp_danish = spacy.load('da_core_news_lg')
+    multilingual_model = SentenceTransformer('sentence-transformers/stsb-xlm-r-multilingual')
+    internal_english_spacy = internal_nlp_english(spacy_english_sentence.text)
+    internal_danish_spacy = internal_nlp_danish(spacy_danish_sentence.text)
+    english_pos = [pos.text.lower() for pos in internal_english_spacy if pos.pos_ == pos_type]
+    danish_pos = [pos.text.lower() for pos in internal_danish_spacy if pos.pos_ == pos_type]
+    for ev in english_pos:
+        ev_sim_score = 0
+        for dv in danish_pos:
+            temp_sim_score = text_similarity.text_similarity(ev, dv, multilingual_model)
+            if temp_sim_score > ev_sim_score:
+                ev_sim_score = temp_sim_score
+        average_verb_sim_score += ev_sim_score
+    if len(english_pos) != 0:
+        return average_verb_sim_score/len(english_pos)
+    else:
+        return -1
+
+
+
+    """for spacy_english_sentence in spacy_english_sentences:
+        temp_english_verbs = [verb for verb in internal_nlp_english(spacy_english_sentence.text) if verb.pos_ == "VERB"]
+        #temp_english_verbs = [verb for verb in internal_nlp_english(spacy_english_sentence.text) if verb.pos_ == "VERB"]
+        english_verbs.append(temp_english_verbs)
+    for spacy_danish_sentence in spacy_danish_sentences:
+        temp_danish_verbs = [verb for verb in internal_nlp_danish(spacy_danish_sentence.text) if verb.pos_ == "VERB"]
+        #temp_danish_verbs = [verb for verb in spacy_danish_sentence]
+        danish_verbs.append(temp_danish_verbs)"""
+
+
 if __name__ == "__main__":
     """    
     1. Match all sentences in the English list.
@@ -135,7 +190,12 @@ if __name__ == "__main__":
     # df = pd.read_csv("en_da.csv")
 
     # da_en statistics (pandas parallel - confirmed)
-    df = pd.read_csv("da_en_statistic.csv")
+    df = pd.read_csv("vikingeskibsmuseet_da_en_statistic.csv")
+    gold_standard = {}
+    for i, row in df.iterrows():
+        gold_standard.update({row['English']: row['Danish']})
+    df = pd.DataFrame(df[:150])
+    gold_standard_df = pd.DataFrame(df)
 
     nlp = spacy.load("xx_sent_ud_sm")
     nlp_danish = spacy.load('da_core_news_lg')
@@ -152,30 +212,56 @@ if __name__ == "__main__":
         english_sentences.append(sent)
     for sent in da_split.sents:
         danish_sentences.append(nlp(sent.text))
+    """print("VERB TESTS ######################################")
+    for i, english_sentence in enumerate(english_sentences):
+        print(sim_score_verbs(english_sentence, danish_sentences[i]))
+    print("VERB TESTS ######################################")"""
+
     print("eng_split: {} \n english_sentences: {}".format(len(eng_split), len(english_sentences)))
     print("da_split: {} \n danish_sentences: {}".format(len(da_split), len(danish_sentences)))
     model = SentenceTransformer('sentence-transformers/stsb-xlm-r-multilingual')
+    gold_standard_df['Similarity Score'] = gold_standard_df.apply(lambda x: text_similarity.text_similarity(x['English'],
+                                                                                                            x['Danish'],
+                                                                                                            embedding_model=model),
+                                                                  axis=1)
+    gold_standard_df.to_csv("vikingeskibsmuseet_gold_standard.csv", index=None)
 
     en_sentence_results, da_sentence_results = match_english_sentences(english_sentences,
                                                                        danish_sentences,
                                                                        model,
-                                                                       search_space=5)
+                                                                       search_space=3)
 
     # English Sentences
     print("===ENGLISH RESULTS ===")
     for e in en_sentence_results:
         print(e)
         print("----")
+    repeat = 10
+    search_space = 3
     repeating_results = repeat_matching(en_sentence_results,
                                         english_sentences,
                                         danish_sentences,
                                         model=model,
-                                        repeat=6,
-                                        search_space=5)
+                                        # I can try adjusting this to see if the repeat value improves accuracy.
+                                        repeat=repeat,
+                                        # Same with search space..
+                                        search_space=search_space)
     en_repeating_results = sorted(repeating_results, key=lambda x: x[0][1])
+    df_final_results_list = []
     for e in en_repeating_results:
         print("ENGLISH: {} \n DANISH: {}".format(e[0], e[1]))
+        df_final_results_list.append([e[0][0], e[1][0]])
         print("---")
+    df_final_results = pd.DataFrame(df_final_results_list, columns=["English", "Danish"])
+    df_final_results['Match'] = df_final_results.apply(lambda x: validate_results(x,
+                                                                                  gold_standard=gold_standard), axis=1)
+    
+    df_final_results['Sim_Score'] = df_final_results.apply(lambda x: text_similarity.text_similarity(x['English'],
+                                                                                                     x['Danish'],
+                                                                                                     embedding_model=model), axis=1)
+    df_final_results.to_csv("vikingeskibsmuseet_final_matched_r{}_ss{}.csv".format(repeat, search_space), index=None)
+    print(df_final_results)
+    print(Counter(df_final_results['Match'].to_list()))
     # Danish Sentences
     """for d in da_sentence_results:
         print(d)
